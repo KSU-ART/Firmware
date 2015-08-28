@@ -147,7 +147,8 @@ public:
 		MAVLINK_MODE_NORMAL = 0,
 		MAVLINK_MODE_CUSTOM,
 		MAVLINK_MODE_ONBOARD,
-		MAVLINK_MODE_OSD
+		MAVLINK_MODE_OSD,
+		MAVLINK_MODE_CONFIG
 	};
 
 	void			set_mode(enum MAVLINK_MODE);
@@ -162,6 +163,14 @@ public:
 	bool			get_flow_control_enabled() { return _flow_control_enabled; }
 
 	bool			get_forwarding_on() { return _forwarding_on; }
+
+	/**
+	 * Set the boot complete flag on all instances
+	 *
+	 * Setting the flag unblocks parameter transmissions, which are gated
+	 * beforehand to ensure that the system is fully initialized.
+	 */
+	static void		set_boot_complete() { _boot_complete = true; }
 
 	/**
 	 * Get the free space in the transmit buffer
@@ -325,6 +334,8 @@ public:
 
 	int 			get_socket_fd () { return _socket_fd; };
 
+	static bool		boot_complete() { return _boot_complete; }
+
 protected:
 	Mavlink			*next;
 
@@ -333,6 +344,7 @@ private:
 
 	int			_mavlink_fd;
 	bool			_task_running;
+	static bool		_boot_complete;
 
 	/* states */
 	bool			_hil_enabled;		/**< Hardware In the Loop mode */
@@ -373,6 +385,7 @@ private:
 	int			_datarate;		///< data rate for normal streams (attitude, position, etc.)
 	int			_datarate_events;	///< data rate for params, waypoints, text messages
 	float			_rate_mult;
+	hrt_abstime		_last_hw_rate_timestamp;
 
 	/**
 	 * If the queue index is not at 0, the queue sending
@@ -442,6 +455,10 @@ private:
 #endif
 
 	static unsigned int	interval_from_rate(float rate);
+
+	static constexpr unsigned RADIO_BUFFER_CRITICAL_LOW_PERCENTAGE = 25;
+	static constexpr unsigned RADIO_BUFFER_LOW_PERCENTAGE = 35;
+	static constexpr unsigned RADIO_BUFFER_HALF_PERCENTAGE = 50;
 
 	int configure_stream(const char *stream_name, const float rate);
 

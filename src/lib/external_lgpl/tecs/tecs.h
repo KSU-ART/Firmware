@@ -79,7 +79,13 @@ public:
 		_SKE_est(0.0f),
 		_SPEdot(0.0f),
 		_SKEdot(0.0f),
+		_STE_error(0.0f),
+		_STEdot_error(0.0f),
+		_SEB_error(0.0f),
+		_SEBdot_error(0.0f),
 		_airspeed_enabled(false),
+		_states_initalized(false),
+		_in_air(false),
 		_throttle_slewrate(0.0f)
 	{
 	}
@@ -95,7 +101,8 @@ public:
 	// Update of the estimated height and height rate internal state
 	// Update of the inertial speed rate internal state
 	// Should be called at 50Hz or greater
-	void update_50hz(float baro_altitude, float airspeed, const math::Matrix<3,3> &rotMat, const math::Vector<3> &accel_body, const math::Vector<3> &accel_earth);
+	void update_state(float baro_altitude, float airspeed, const math::Matrix<3,3> &rotMat,
+		const math::Vector<3> &accel_body, const math::Vector<3> &accel_earth, bool altitude_lock, bool in_air);
 
 	// Update the control loop calculations
 	void update_pitch_throttle(const math::Matrix<3,3> &rotMat, float pitch, float baro_altitude, float hgt_dem, float EAS_dem, float indicated_airspeed, float EAS2TAS, bool climbOutDem, float ptchMinCO,
@@ -134,18 +141,22 @@ public:
 
 	struct tecs_state {
 		uint64_t timestamp;
-		float hgt;
-		float dhgt;
-		float hgt_dem;
-		float dhgt_dem;
-		float spd_dem;
-		float spd;
-		float dspd;
-		float ithr;
-		float iptch;
-		float thr;
-		float ptch;
-		float dspd_dem;
+		float altitude_filtered;
+		float altitude_sp;
+		float altitude_rate;
+		float altitude_rate_sp;
+		float airspeed_filtered;
+		float airspeed_sp;
+		float airspeed_rate;
+		float airspeed_rate_sp;
+		float energy_error_integ;
+		float energy_distribution_error_integ;
+		float total_energy_error;
+		float total_energy_rate_error;
+		float energy_distribution_error;
+		float energy_distribution_rate_error;
+		float throttle_integ;
+		float pitch_integ;
 		enum ECL_TECS_MODE mode;
 	};
 
@@ -373,10 +384,24 @@ private:
 	// Specific energy error quantities
 	float _STE_error;
 
+	// Energy error rate
+	float _STEdot_error;
+
+	// Specific energy balance error
+	float _SEB_error;
+
+	// Specific energy balance error rate
+	float _SEBdot_error;
+
 	// Time since last update of main TECS loop (seconds)
 	float _DT;
 
+	static constexpr float DT_MIN = 0.1f;
+	static constexpr float DT_MAX = 1.0f;
+
 	bool _airspeed_enabled;
+	bool _states_initalized;
+	bool _in_air;
 	float _throttle_slewrate;
 	float _indicated_airspeed_min;
 	float _indicated_airspeed_max;

@@ -80,10 +80,6 @@
 #	to the directory 'build' under the directory containing the
 #	parent Makefile.
 #
-# ROMFS_ROOT:
-#	If set to the path to a directory, a ROMFS image will be generated
-#	containing the files under the directory and linked into the final
-#	image.
 #
 # MODULE_SEARCH_DIRS:
 #	Extra directories to search first for MODULES before looking in the
@@ -184,6 +180,12 @@ EXTRA_CLEANS		 =
 # Append the per-board driver directory to the header search path.
 #
 INCLUDE_DIRS		+= $(PX4_MODULE_SRC)drivers/boards/$(BOARD)
+
+################################################################################
+# External library includes
+################################################################################
+
+INCLUDE_DIRS		+= $(PX4_BASE)src/lib/eigen/
 
 ################################################################################
 # OS specific libraries and paths

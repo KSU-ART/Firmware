@@ -108,6 +108,7 @@
 #include <geo/geo.h>
 #include <systemlib/state_table.h>
 #include <dataman/dataman.h>
+#include <navigator/navigation.h>
 
 #include "px4_custom_mode.h"
 #include "commander_helper.h"
@@ -197,6 +198,8 @@ static struct home_position_s _home;
 
 static unsigned _last_mission_instance = 0;
 
+struct vtol_vehicle_status_s vtol_status;
+
 /**
  * The daemon app only briefly exists to start
  * the background job. The stack size assigned in the
@@ -235,6 +238,8 @@ void check_valid(hrt_abstime timestamp, hrt_abstime timeout, bool valid_in, bool
 transition_result_t set_main_state_rc(struct vehicle_status_s *status, struct manual_control_setpoint_s *sp_man);
 
 void set_control_mode();
+
+bool stabilization_required();
 
 void print_reject_mode(struct vehicle_status_s *current_status, const char *msg);
 
@@ -281,7 +286,7 @@ int commander_main(int argc, char *argv[])
 	if (!strcmp(argv[1], "start")) {
 
 		if (thread_running) {
-			warnx("commander already running");
+			warnx("already running");
 			/* this is not an error */
 			return 0;
 		}
@@ -292,13 +297,20 @@ int commander_main(int argc, char *argv[])
 					     SCHED_PRIORITY_MAX - 40,
 					     3400,
 					     commander_thread_main,
-					     (argv) ? (char * const *)&argv[2] : (char * const *)NULL);
+					     (char * const *)&argv[0]);
 
-		while (!thread_running) {
-			usleep(200);
+		unsigned constexpr max_wait_us = 1000000;
+		unsigned constexpr max_wait_steps = 2000;
+
+		unsigned i;
+		for (i = 0; i < max_wait_steps; i++) {
+			usleep(max_wait_us / max_wait_steps);
+			if (thread_running) {
+				break;
+			}
 		}
 
-		return 0;
+		return !(i < max_wait_steps);
 	}
 
 	if (!strcmp(argv[1], "stop")) {
@@ -350,7 +362,7 @@ int commander_main(int argc, char *argv[])
 
 			if (calib_ret) {
 				warnx("calibration failed, exiting.");
-				return 0;
+				return 1;
 			} else {
 				return 0;
 			}
@@ -379,7 +391,7 @@ int commander_main(int argc, char *argv[])
 		int mavlink_fd_local = px4_open(MAVLINK_LOG_DEVICE, 0);
 		arm_disarm(false, mavlink_fd_local, "command line");
 		px4_close(mavlink_fd_local);
-                return 0;
+		return 0;
 	}
 
 	usage("unrecognized command");
@@ -785,6 +797,7 @@ bool handle_command(struct vehicle_status_s *status_local, const struct safety_s
 	case vehicle_command_s::VEHICLE_CMD_DO_MOUNT_CONTROL_QUAT:
 	case vehicle_command_s::VEHICLE_CMD_DO_MOUNT_CONFIGURE:
 	case vehicle_command_s::VEHICLE_CMD_DO_TRIGGER_CONTROL:
+	case vehicle_command_s::VEHICLE_CMD_DO_VTOL_TRANSITION:
 		/* ignore commands that handled in low prio loop */
 		break;
 
@@ -863,6 +876,23 @@ int commander_thread_main(int argc, char *argv[])
 
 	bool arm_tune_played = false;
 	bool was_armed = false;
+
+	bool startup_in_hil = false;
+
+#ifdef __PX4_NUTTX
+	/* NuttX indicates 3 arguments when only 2 are present */
+	argc -= 1;
+#endif
+
+	if (argc > 2) {
+		if (!strcmp(argv[2],"-hil")) {
+			startup_in_hil = true;
+		} else {
+			PX4_ERR("Argument %s not supported.", argv[2]);
+			PX4_ERR("COMMANDER NOT STARTED");
+			thread_should_exit = true;
+		}
+	}
 
 	/* set parameters */
 	param_t _param_sys_type = param_find("MAV_TYPE");
@@ -945,7 +975,12 @@ int commander_thread_main(int argc, char *argv[])
 	status.main_state =vehicle_status_s::MAIN_STATE_MANUAL;
 	status.nav_state = vehicle_status_s::NAVIGATION_STATE_MANUAL;
 	status.arming_state = vehicle_status_s::ARMING_STATE_INIT;
-	status.hil_state = vehicle_status_s::HIL_STATE_OFF;
+
+	if(startup_in_hil) {
+		status.hil_state = vehicle_status_s::HIL_STATE_ON;
+	} else {
+		status.hil_state = vehicle_status_s::HIL_STATE_OFF;
+	}
 	status.failsafe = false;
 
 	/* neither manual nor offboard control commands have been received */
@@ -1074,12 +1109,12 @@ int commander_thread_main(int argc, char *argv[])
 	memset(&offboard_control_mode, 0, sizeof(offboard_control_mode));
 
 	/* Subscribe to telemetry status topics */
-	int telemetry_subs[TELEMETRY_STATUS_ORB_ID_NUM];
-	uint64_t telemetry_last_heartbeat[TELEMETRY_STATUS_ORB_ID_NUM];
-	uint64_t telemetry_last_dl_loss[TELEMETRY_STATUS_ORB_ID_NUM];
-	bool telemetry_lost[TELEMETRY_STATUS_ORB_ID_NUM];
+	int telemetry_subs[ORB_MULTI_MAX_INSTANCES];
+	uint64_t telemetry_last_heartbeat[ORB_MULTI_MAX_INSTANCES];
+	uint64_t telemetry_last_dl_loss[ORB_MULTI_MAX_INSTANCES];
+	bool telemetry_lost[ORB_MULTI_MAX_INSTANCES];
 
-	for (int i = 0; i < TELEMETRY_STATUS_ORB_ID_NUM; i++) {
+	for (int i = 0; i < ORB_MULTI_MAX_INSTANCES; i++) {
 		telemetry_subs[i] = -1;
 		telemetry_last_heartbeat[i] = 0;
 		telemetry_last_dl_loss[i] = 0;
@@ -1162,7 +1197,7 @@ int commander_thread_main(int argc, char *argv[])
 
 	/* Subscribe to vtol vehicle status topic */
 	int vtol_vehicle_status_sub = orb_subscribe(ORB_ID(vtol_vehicle_status));
-	struct vtol_vehicle_status_s vtol_status;
+	//struct vtol_vehicle_status_s vtol_status;
 	memset(&vtol_status, 0, sizeof(vtol_status));
 	vtol_status.vtol_in_rw_mode = true;		//default for vtol is rotary wing
 
@@ -1340,10 +1375,10 @@ int commander_thread_main(int argc, char *argv[])
 			}
 		}
 
-		for (int i = 0; i < TELEMETRY_STATUS_ORB_ID_NUM; i++) {
+		for (int i = 0; i < ORB_MULTI_MAX_INSTANCES; i++) {
 
-			if (telemetry_subs[i] < 0 && (OK == orb_exists(telemetry_status_orb_id[i], 0))) {
-				telemetry_subs[i] = orb_subscribe(telemetry_status_orb_id[i]);
+			if (telemetry_subs[i] < 0 && (OK == orb_exists(ORB_ID(telemetry_status), i))) {
+				telemetry_subs[i] = orb_subscribe_multi(ORB_ID(telemetry_status), i);
 			}
 
 			orb_check(telemetry_subs[i], &updated);
@@ -1352,13 +1387,20 @@ int commander_thread_main(int argc, char *argv[])
 				struct telemetry_status_s telemetry;
 				memset(&telemetry, 0, sizeof(telemetry));
 
-				orb_copy(telemetry_status_orb_id[i], telemetry_subs[i], &telemetry);
+				orb_copy(ORB_ID(telemetry_status), telemetry_subs[i], &telemetry);
 
 				/* perform system checks when new telemetry link connected */
-				if (mavlink_fd &&
-				    telemetry_last_heartbeat[i] == 0 &&
-				    telemetry.heartbeat_time > 0 &&
-				    hrt_elapsed_time(&telemetry.heartbeat_time) < datalink_loss_timeout * 1e6) {
+				if (
+				    /* we actually have a way to talk to the user */
+				    mavlink_fd &&
+				    /* we first connect a link or re-connect a link after loosing it */
+				    (telemetry_last_heartbeat[i] == 0 || (hrt_elapsed_time(&telemetry_last_heartbeat[i]) > 3 * 1000 * 1000)) &&
+				    /* and this link has a communication partner */
+				    (telemetry.heartbeat_time > 0) &&
+				    /* and it is still connected */
+				    (hrt_elapsed_time(&telemetry.heartbeat_time) < 2 * 1000 * 1000) &&
+				    /* and the system is not already armed (and potentially flying) */
+				    !armed.armed) {
 
 				    	bool chAirspeed = false;
 					/* Perform airspeed check only if circuit breaker is not
@@ -1484,6 +1526,7 @@ int commander_thread_main(int argc, char *argv[])
 			/* Make sure that this is only adjusted if vehicle really is of type vtol*/
 			if (is_vtol(&status)) {
 				status.is_rotary_wing = vtol_status.vtol_in_rw_mode;
+				status.in_transition_mode = vtol_status.vtol_in_trans_mode;
 			}
 		}
 
@@ -1830,7 +1873,7 @@ int commander_thread_main(int argc, char *argv[])
 
 			} else {
 				if (status.rc_signal_lost) {
-					mavlink_log_critical(mavlink_fd, "RC SIGNAL REGAINED after %llums",
+					mavlink_log_info(mavlink_fd, "RC SIGNAL REGAINED after %llums",
 							     (hrt_absolute_time() - status.rc_signal_lost_timestamp) / 1000);
 					status_changed = true;
 				}
@@ -1946,7 +1989,7 @@ int commander_thread_main(int argc, char *argv[])
 		/* data links check */
 		bool have_link = false;
 
-		for (int i = 0; i < TELEMETRY_STATUS_ORB_ID_NUM; i++) {
+		for (int i = 0; i < ORB_MULTI_MAX_INSTANCES; i++) {
 			if (telemetry_last_heartbeat[i] != 0 &&
 			    hrt_elapsed_time(&telemetry_last_heartbeat[i]) < datalink_loss_timeout * 1e6) {
 				/* handle the case where data link was gained first time or regained,
@@ -1957,7 +2000,7 @@ int commander_thread_main(int argc, char *argv[])
 
 					/* only report a regain */
 					if (telemetry_last_dl_loss[i] > 0) {
-						mavlink_and_console_log_critical(mavlink_fd, "data link #%i regained", i);
+						mavlink_and_console_log_info(mavlink_fd, "data link #%i regained", i);
 					}
 
 					telemetry_lost[i] = false;
@@ -1975,7 +2018,7 @@ int commander_thread_main(int argc, char *argv[])
 					/* only reset the timestamp to a different time on state change */
 					telemetry_last_dl_loss[i]  = hrt_absolute_time();
 
-					mavlink_and_console_log_critical(mavlink_fd, "data link #%i lost", i);
+					mavlink_and_console_log_info(mavlink_fd, "data link #%i lost", i);
 					telemetry_lost[i] = true;
 				}
 			}
@@ -1990,7 +2033,9 @@ int commander_thread_main(int argc, char *argv[])
 
 		} else {
 			if (!status.data_link_lost) {
-				mavlink_and_console_log_critical(mavlink_fd, "ALL DATA LINKS LOST");
+				if (armed.armed) {
+					mavlink_and_console_log_critical(mavlink_fd, "ALL DATA LINKS LOST");
+				}
 				status.data_link_lost = true;
 				status.data_link_lost_counter++;
 				status_changed = true;
@@ -2151,6 +2196,19 @@ int commander_thread_main(int argc, char *argv[])
 			orb_publish(ORB_ID(vehicle_status), status_pub, &status);
 
 			armed.timestamp = now;
+
+			/* set prearmed state if safety is off, or safety is not present and 5 seconds passed */
+			if (safety.safety_switch_available) {
+
+				/* safety is off, go into prearmed */
+				armed.prearmed = safety.safety_off;
+			} else {
+				/* safety is not present, go into prearmed
+				 * (all output drivers should be started / unlocked last in the boot process
+				 * when the rest of the system is fully initialized)
+				 */
+				armed.prearmed = (hrt_elapsed_time(&commander_boot_timestamp) > 5 * 1000 * 1000);
+			}
 			orb_publish(ORB_ID(actuator_armed), armed_pub, &armed);
 		}
 
@@ -2186,7 +2244,6 @@ int commander_thread_main(int argc, char *argv[])
 			arm_tune_played = false;
 		}
 
-		//fflush(stdout);
 		counter++;
 
 		int blink_state = blink_msg_state();
@@ -2504,8 +2561,8 @@ set_control_mode()
 	case vehicle_status_s::NAVIGATION_STATE_MANUAL:
 		control_mode.flag_control_manual_enabled = true;
 		control_mode.flag_control_auto_enabled = false;
-		control_mode.flag_control_rates_enabled = (status.is_rotary_wing || status.vtol_fw_permanent_stab);
-		control_mode.flag_control_attitude_enabled = (status.is_rotary_wing || status.vtol_fw_permanent_stab);
+		control_mode.flag_control_rates_enabled = stabilization_required();
+		control_mode.flag_control_attitude_enabled = stabilization_required();
 		control_mode.flag_control_altitude_enabled = false;
 		control_mode.flag_control_climb_rate_enabled = false;
 		control_mode.flag_control_position_enabled = false;
@@ -2546,8 +2603,8 @@ set_control_mode()
 		control_mode.flag_control_attitude_enabled = true;
 		control_mode.flag_control_altitude_enabled = true;
 		control_mode.flag_control_climb_rate_enabled = true;
-		control_mode.flag_control_position_enabled = true;
-		control_mode.flag_control_velocity_enabled = true;
+		control_mode.flag_control_position_enabled = !status.in_transition_mode;
+		control_mode.flag_control_velocity_enabled = !status.in_transition_mode;
 		control_mode.flag_control_termination_enabled = false;
 		break;
 
@@ -2655,13 +2712,13 @@ set_control_mode()
 			!offboard_control_mode.ignore_velocity ||
 			!offboard_control_mode.ignore_acceleration_force;
 
-		control_mode.flag_control_velocity_enabled = !offboard_control_mode.ignore_velocity ||
-			!offboard_control_mode.ignore_position;
+		control_mode.flag_control_velocity_enabled = (!offboard_control_mode.ignore_velocity ||
+			!offboard_control_mode.ignore_position) && !status.in_transition_mode;
 
 		control_mode.flag_control_climb_rate_enabled = !offboard_control_mode.ignore_velocity ||
 			!offboard_control_mode.ignore_position;
 
-		control_mode.flag_control_position_enabled = !offboard_control_mode.ignore_position;
+		control_mode.flag_control_position_enabled = !offboard_control_mode.ignore_position && !status.in_transition_mode;
 
 		control_mode.flag_control_altitude_enabled = !offboard_control_mode.ignore_velocity ||
 			!offboard_control_mode.ignore_position;
@@ -2671,6 +2728,15 @@ set_control_mode()
 	default:
 		break;
 	}
+}
+
+bool
+stabilization_required()
+{
+	return (status.is_rotary_wing ||		// is a rotary wing, or
+		status.vtol_fw_permanent_stab || 	// is a VTOL in fixed wing mode and stabilisation is on, or
+		(vtol_status.vtol_in_trans_mode && 	// is currently a VTOL transitioning AND
+			!status.is_rotary_wing));	// is a fixed wing, ie: transitioning back to rotary wing mode
 }
 
 void
@@ -2973,6 +3039,21 @@ void *commander_low_prio_loop(void *arg)
 								mavlink_log_critical(mavlink_fd, "ERROR: %s", strerror(ret));
 							}
 
+							answer_command(cmd, vehicle_command_s::VEHICLE_CMD_RESULT_FAILED);
+						}
+					} else if (((int)(cmd.param1)) == 2) {
+
+						/* reset parameters and save empty file */
+						param_reset_all();
+						int ret = param_save_default();
+
+						if (ret == OK) {
+							/* do not spam MAVLink, but provide the answer / green led mechanism */
+							mavlink_log_critical(mavlink_fd, "onboard parameters reset");
+							answer_command(cmd, vehicle_command_s::VEHICLE_CMD_RESULT_ACCEPTED);
+
+						} else {
+							mavlink_log_critical(mavlink_fd, "param reset error");
 							answer_command(cmd, vehicle_command_s::VEHICLE_CMD_RESULT_FAILED);
 						}
 					}
