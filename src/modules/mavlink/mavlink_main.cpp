@@ -94,6 +94,7 @@
 #endif
 static const int ERROR = -1;
 
+#define DEFAULT_REMOTE_PORT_UDP			14550 ///< GCS port per MAVLink spec
 #define DEFAULT_DEVICE_NAME			"/dev/ttyS1"
 #define MAX_DATA_RATE				10000000	///< max data rate in bytes/s
 #define MAIN_LOOP_DELAY 			10000	///< 100 Hz @ 1000 bytes/s data rate
@@ -885,6 +886,7 @@ Mavlink::send_message(const uint8_t msgid, const void *msg, uint8_t component_ID
 		ret = sendto(_socket_fd, buf, packet_len, 0, (struct sockaddr *)&_src_addr, sizeof(_src_addr));
 	} else if (get_protocol() == TCP) {
 		// not implemented, but possible to do so
+		warnx("TCP transport pending implementation");
 	}
 #endif
 
@@ -974,11 +976,12 @@ Mavlink::init_udp()
 		return;
 	}
 
-	unsigned char inbuf[256];
-	socklen_t addrlen = sizeof(_src_addr);
+	// set default target address
+	memset((char *)&_src_addr, 0, sizeof(_src_addr));
+	_src_addr.sin_family = AF_INET;
+	inet_aton("127.0.0.1", &_src_addr.sin_addr);
+	_src_addr.sin_port = htons(DEFAULT_REMOTE_PORT_UDP);
 
-	// wait for client to connect to socket
-	recvfrom(_socket_fd,inbuf,sizeof(inbuf),0,(struct sockaddr *)&_src_addr,&addrlen);
 #endif
 }
 
@@ -1543,11 +1546,6 @@ Mavlink::task_main(int argc, char *argv[])
 	/* flush stdout in case MAVLink is about to take it over */
 	fflush(stdout);
 
-	/* init socket if necessary */
-	if (get_protocol() == UDP) {
-		init_udp();
-	}
-
 #ifndef __PX4_POSIX
 	struct termios uart_config_original;
 
@@ -1723,6 +1721,11 @@ Mavlink::task_main(int argc, char *argv[])
 
 	/* now the instance is fully initialized and we can bump the instance count */
 	LL_APPEND(_mavlink_instances, this);
+
+	/* init socket if necessary */
+	if (get_protocol() == UDP) {
+		init_udp();
+	}
 
 	/* if the protocol is serial, we send the system version blindly */
 	if (get_protocol() == SERIAL) {
