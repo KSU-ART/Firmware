@@ -263,6 +263,7 @@ int position_estimator_inav_thread_main(int argc, char *argv[])
 	float surface_offset = 0.0f;	// ground level offset from reference altitude
 	float surface_offset_rate = 0.0f;	// surface offset change rate
 
+	// High resolution abstolute timer
 	hrt_abstime accel_timestamp = 0;
 	hrt_abstime baro_timestamp = 0;
 
@@ -378,7 +379,8 @@ int position_estimator_inav_thread_main(int argc, char *argv[])
 	orb_copy(ORB_ID(parameter_update), parameter_update_sub, &param_update); /* read from param topic to clear updated flag */
 	/* first parameters update */
 	inav_parameters_update(&pos_inav_param_handles, &params);
-
+	
+	// Polls the semaphore
 	px4_pollfd_struct_t fds_init[1] = {
 		{ .fd = sensor_combined_sub, .events = POLLIN },
 	};
@@ -403,6 +405,7 @@ int position_estimator_inav_thread_main(int argc, char *argv[])
 					baro_timestamp = sensor.baro_timestamp;
 
 					/* mean calculation over several measurements */
+					// Wait for 200 readings and then average the value
 					if (baro_init_cnt < baro_init_num) {
 						if (PX4_ISFINITE(sensor.baro_alt_meter)) {
 							baro_offset += sensor.baro_alt_meter;
@@ -499,7 +502,8 @@ int position_estimator_inav_thread_main(int argc, char *argv[])
 					accel_timestamp = sensor.accelerometer_timestamp;
 					accel_updates++;
 				}
-
+				
+				// See sensor.cpp for more info on Barometer data
 				if (sensor.baro_timestamp != baro_timestamp) {
 					corr_baro = baro_offset - sensor.baro_alt_meter - z_est[0];
 					baro_timestamp = sensor.baro_timestamp;
